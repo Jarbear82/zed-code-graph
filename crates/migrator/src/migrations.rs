@@ -358,3 +358,21 @@ pub(crate) mod m_2026_04_17 {
 
     pub(crate) use settings::promote_show_branch_icon_true_to_show_branch_status_icon;
 }
+
+pub(crate) mod m_2026_05_04 {
+    mod settings;
+
+    pub(crate) use settings::SETTINGS_PATTERNS;
+}
+
+pub(crate) mod m_2026_08_17 {
+    mod settings;
+
+    pub(crate) use settings::make_git_gutter_width_an_enum;
+}
+
+pub(crate) mod m_2026_08_26 {
+    mod settings;
+
+    pub(crate) use settings::rename_folder_icons_to_folder_indicator;
+}

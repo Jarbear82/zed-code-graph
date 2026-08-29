@@ -184,6 +184,7 @@ impl VsCodeSettings {
             diagnostics: None,
             editor: self.editor_settings_content(),
             extension: ExtensionSettingsContent::default(),
+            call_hierarchy: None,
             file_finder: None,
             git: self.git_settings_content(),
             git_panel: self.git_panel_settings_content(),
@@ -192,12 +193,13 @@ impl VsCodeSettings {
                 ..GlobalLspSettingsContent::default()
             }),
             helix_mode: None,
+            hide_mouse: None,
             image_viewer: None,
+            markdown_preview: None,
             journal: None,
             language_models: None,
             line_indicator_format: None,
             log: None,
-            message_editor: None,
             node: self.node_binary_settings(),
 
             outline_panel: self.outline_panel_settings_content(),
@@ -205,6 +207,11 @@ impl VsCodeSettings {
             project: self.project_settings_content(),
             project_panel: self.project_panel_settings_content(),
             proxy: self.read_string("http.proxy"),
+            reduce_motion: self.read_enum("workbench.reduceMotion", |s| match s {
+                "on" => Some(ReduceMotionMode::On),
+                "off" => Some(ReduceMotionMode::Off),
+                _ => None,
+            }),
             remote: RemoteSettingsContent::default(),
             repl: None,
             server_url: None,
@@ -238,6 +245,7 @@ impl VsCodeSettings {
     fn editor_settings_content(&self) -> EditorSettingsContent {
         EditorSettingsContent {
             auto_signature_help: self.read_bool("editor.parameterHints.enabled"),
+            language_detection: self.read_bool("workbench.editor.languageDetection"),
             autoscroll_on_clicks: None,
             cursor_blink: self.read_enum("editor.cursorBlinking", |s| match s {
                 "blink" | "phase" | "expand" | "smooth" => Some(true),
@@ -266,8 +274,8 @@ impl VsCodeSettings {
             sticky_scroll: self.sticky_scroll_content(),
             go_to_definition_fallback: None,
             go_to_definition_scroll_strategy: None,
+            lsp_results_location: None,
             gutter: self.gutter_content(),
-            hide_mouse: None,
             horizontal_scroll_margin: None,
             hover_popover_delay: self.read_u64("editor.hover.delay").map(Into::into),
             hover_popover_enabled: self.read_bool("editor.hover.enabled"),
@@ -277,6 +285,7 @@ impl VsCodeSettings {
             code_lens: None,
             jupyter: None,
             lsp_document_colors: None,
+            lsp_document_links: self.read_bool("editor.links"),
             lsp_highlight_debounce: None,
             middle_click_paste: None,
             minimap: self.minimap_content(),
@@ -315,6 +324,7 @@ impl VsCodeSettings {
             vertical_scroll_margin: self.read_f32("editor.cursorSurroundingLines"),
             completion_menu_scrollbar: None,
             completion_detail_alignment: None,
+            completion_menu_item_kind: None,
             diff_view_style: None,
             minimum_split_diff_width: None,
         }
@@ -342,6 +352,7 @@ impl VsCodeSettings {
                 "never" => Some(false),
                 _ => None,
             }),
+            git_gutter_width: None,
         })
     }
 
@@ -368,6 +379,7 @@ impl VsCodeSettings {
     fn search_content(&self) -> Option<SearchSettingsContent> {
         skip_default(SearchSettingsContent {
             include_ignored: self.read_bool("search.useIgnoreFiles"),
+            search_on_type: self.read_bool("search.searchOnType"),
             ..Default::default()
         })
     }
@@ -472,13 +484,12 @@ impl VsCodeSettings {
     }
 
     fn minimap_content(&self) -> Option<MinimapContent> {
-        let minimap_enabled = self.read_bool("editor.minimap.enabled");
-        let autohide = self.read_bool("editor.minimap.autohide");
+        let minimap_enabled = self.read_bool("editor.minimap.enabled").unwrap_or(true);
+        let autohide = self.read_bool("editor.minimap.autohide").unwrap_or(false);
         let show = match (minimap_enabled, autohide) {
-            (Some(true), Some(false)) => Some(ShowMinimap::Always),
-            (Some(true), _) => Some(ShowMinimap::Auto),
-            (Some(false), _) => Some(ShowMinimap::Never),
-            _ => None,
+            (true, false) => Some(ShowMinimap::Always),
+            (true, true) => Some(ShowMinimap::Auto),
+            (false, _) => Some(ShowMinimap::Never),
         };
 
         skip_default(MinimapContent {
@@ -553,9 +564,15 @@ impl VsCodeSettings {
             extend_comment_on_newline: None,
             extend_list_on_newline: None,
             indent_list_on_tab: None,
-            format_on_save: self.read_bool("editor.guides.formatOnSave").map(|b| {
-                if b {
-                    FormatOnSave::On
+            // In VS Code, `editor.formatOnSaveMode` only applies when `editor.formatOnSave` is enabled.
+            format_on_save: self.read_bool("editor.formatOnSave").map(|enabled| {
+                if enabled {
+                    self.read_enum("editor.formatOnSaveMode", |s| match s {
+                        "modificationsIfAvailable" => Some(FormatOnSave::ModificationsIfAvailable),
+                        "modifications" => Some(FormatOnSave::Modifications),
+                        _ => None,
+                    })
+                    .unwrap_or(FormatOnSave::On)
                 } else {
                     FormatOnSave::Off
                 }
@@ -629,15 +646,19 @@ impl VsCodeSettings {
         }
     }
 
-    fn file_types(&self) -> Option<HashMap<Arc<str>, ExtendingVec<String>>> {
+    fn file_types(&self) -> Option<FileTypeMap> {
         // vscodes file association map is inverted from ours, so we flip the mapping before merging
-        let mut associations: HashMap<Arc<str>, ExtendingVec<String>> = HashMap::default();
+        let mut associations: HashMap<Arc<str>, ExtendingSet<String>> = HashMap::default();
         let map = self.read_value("files.associations")?.as_object()?;
         for (k, v) in map {
             let Some(v) = v.as_str() else { continue };
-            associations.entry(v.into()).or_default().0.push(k.clone());
+            associations
+                .entry(v.into())
+                .or_default()
+                .0
+                .insert(k.clone());
         }
-        skip_default(associations)
+        skip_default(FileTypeMap(associations))
     }
 
     fn edit_predictions_settings_content(&self) -> Option<EditPredictionSettingsContent> {
@@ -660,7 +681,13 @@ impl VsCodeSettings {
     fn outline_panel_settings_content(&self) -> Option<OutlinePanelSettingsContent> {
         skip_default(OutlinePanelSettingsContent {
             file_icons: self.read_bool("outline.icons"),
-            folder_icons: self.read_bool("outline.icons"),
+            folder_indicator: self.read_bool("outline.icons").map(|icons| {
+                if icons {
+                    FolderIndicator::Icon
+                } else {
+                    FolderIndicator::Chevron
+                }
+            }),
             git_status: self.read_bool("git.decorations.enabled"),
             ..Default::default()
         })
@@ -803,7 +830,7 @@ impl VsCodeSettings {
             drag_and_drop: None,
             entry_spacing: None,
             file_icons: None,
-            folder_icons: None,
+            folder_indicator: None,
             git_status: self.read_bool("git.decorations.enabled"),
             hide_gitignore: self.read_bool("explorer.excludeGitIgnore"),
             hide_hidden: None,
@@ -861,6 +888,7 @@ impl VsCodeSettings {
             Some(TelemetrySettingsContent {
                 metrics: Some(metrics),
                 diagnostics: Some(diagnostics),
+                anthropic_retention: None,
             })
         })
     }
@@ -889,6 +917,7 @@ impl VsCodeSettings {
             default_height: None,
             default_width: None,
             dock: None,
+            starts_open: None,
             font_fallbacks,
             font_family,
             font_features: None,
@@ -897,6 +926,7 @@ impl VsCodeSettings {
                 .map(FontSize::from),
             font_weight: None,
             keep_selection_on_copy: None,
+            open_links_in_mouse_mode: None,
             line_height: self
                 .read_f32("terminal.integrated.lineHeight")
                 .map(|lh| TerminalLineHeight::Custom(lh)),
@@ -974,9 +1004,14 @@ impl VsCodeSettings {
             buffer_font_weight: self.read_f32("editor.fontWeight").map(FontWeightContent),
             buffer_line_height: None,
             buffer_font_features: None,
+            agent_ui_font_family: None,
             agent_ui_font_size: None,
+            agent_buffer_font_family: None,
             agent_buffer_font_size: None,
+            git_commit_buffer_font_size: None,
             markdown_preview_font_family: None,
+            markdown_preview_code_font_family: None,
+            markdown_preview_font_size: None,
             markdown_preview_theme: None,
             theme: None,
             icon_theme: None,
@@ -990,6 +1025,7 @@ impl VsCodeSettings {
     fn workspace_settings_content(&self) -> WorkspaceSettingsContent {
         WorkspaceSettingsContent {
             active_pane_modifiers: self.active_pane_modifiers(),
+            accessible_mode: None,
             text_rendering_mode: None,
             autosave: self.read_enum("files.autoSave", |s| match s {
                 "off" => Some(AutosaveSetting::Off),
@@ -1007,6 +1043,7 @@ impl VsCodeSettings {
             bottom_dock_layout: None,
             centered_layout: None,
             cli_default_open_behavior: None,
+            default_open_behavior: None,
             close_on_file_delete: None,
             close_panel_on_toggle: None,
             command_aliases: Default::default(),
@@ -1030,12 +1067,20 @@ impl VsCodeSettings {
             pane_split_direction_vertical: None,
             resize_all_panels_in_dock: None,
             restore_on_file_reopen: self.read_bool("workbench.editor.restoreViewState"),
+            reveal_if_open: self.read_bool("workbench.editor.revealIfOpen"),
             restore_on_startup: None,
             window_decorations: None,
             show_call_status_icon: None,
-            use_system_path_prompts: self.read_bool("files.simpleDialog.enable"),
+            use_system_path_prompts: self.read_bool("files.simpleDialog.enable").map(|b| !b),
             use_system_prompts: None,
             use_system_window_tabs: self.read_bool("window.nativeTabs"),
+            fullscreen_mode: self.read_bool("window.nativeFullScreen").map(|b| {
+                if b {
+                    FullscreenMode::Native
+                } else {
+                    FullscreenMode::Simple
+                }
+            }),
             when_closing_with_no_tabs: self.read_bool("window.closeWhenEmpty").map(|b| {
                 if b {
                     CloseWindowWhenNoItems::CloseWindow
@@ -1064,6 +1109,7 @@ impl VsCodeSettings {
     fn worktree_settings_content(&self) -> WorktreeSettingsContent {
         WorktreeSettingsContent {
             prevent_sharing_in_public_channels: false,
+            file_scan_depth: None,
             file_scan_exclusions: self
                 .read_value("files.watcherExclude")
                 .and_then(|v| v.as_array())
@@ -1072,7 +1118,8 @@ impl VsCodeSettings {
                         .filter_map(|n| n.as_str().map(str::to_owned))
                         .collect::<Vec<_>>()
                 })
-                .filter(|r| !r.is_empty()),
+                .filter(|r| !r.is_empty())
+                .map(SplicingVec::from),
             file_scan_inclusions: self
                 .read_value("files.watcherInclude")
                 .and_then(|v| v.as_array())
@@ -1082,6 +1129,7 @@ impl VsCodeSettings {
                         .collect::<Vec<_>>()
                 })
                 .filter(|r| !r.is_empty()),
+            scan_symlinks: None,
             private_files: None,
             hidden_files: None,
             read_only_files: self
@@ -1108,5 +1156,46 @@ fn skip_default<T: Default + PartialEq>(value: T) -> Option<T> {
         None
     } else {
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn imported_reduce_motion(content: &str) -> Option<ReduceMotionMode> {
+        VsCodeSettings::from_str(content, VsCodeSettingsSource::VsCode)
+            .unwrap()
+            .settings_content()
+            .reduce_motion
+    }
+
+    #[test]
+    fn test_import_reduce_motion() {
+        assert_eq!(
+            imported_reduce_motion(r#"{ "workbench.reduceMotion": "on" }"#),
+            Some(ReduceMotionMode::On)
+        );
+        assert_eq!(
+            imported_reduce_motion(r#"{ "workbench.reduceMotion": "off" }"#),
+            Some(ReduceMotionMode::Off)
+        );
+        assert_eq!(
+            imported_reduce_motion(r#"{ "workbench.reduceMotion": "auto" }"#),
+            None
+        );
+        assert_eq!(imported_reduce_motion("{}"), None);
+    }
+
+    #[test]
+    fn test_import_reveal_if_open() {
+        let settings = VsCodeSettings::from_str(
+            r#"{ "workbench.editor.revealIfOpen": true }"#,
+            VsCodeSettingsSource::VsCode,
+        )
+        .unwrap()
+        .settings_content();
+
+        assert_eq!(settings.workspace.reveal_if_open, Some(true));
     }
 }

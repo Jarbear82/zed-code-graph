@@ -42,7 +42,7 @@ fn migrate(text: &str, patterns: MigrationPatterns, query: &Query) -> Result<Opt
         }
     }
 
-    edits.sort_by_key(|(range, _)| (range.start, Reverse(range.end)));
+    edits.sort_unstable_by_key(|(range, _)| (range.start, Reverse(range.end)));
     edits.dedup_by(|(range_b, _), (range_a, _)| {
         range_a.contains(&range_b.start) || range_a.contains(&range_b.end)
     });
@@ -253,6 +253,12 @@ pub fn migrate_settings(text: &str) -> Result<Option<String>> {
         MigrationType::Json(
             migrations::m_2026_04_17::promote_show_branch_icon_true_to_show_branch_status_icon,
         ),
+        MigrationType::TreeSitter(
+            migrations::m_2026_05_04::SETTINGS_PATTERNS,
+            &SETTINGS_QUERY_2026_05_04,
+        ),
+        MigrationType::Json(migrations::m_2026_08_17::make_git_gutter_width_an_enum),
+        MigrationType::Json(migrations::m_2026_08_26::rename_folder_icons_to_folder_indicator),
     ];
     run_migrations(text, migrations)
 }
@@ -394,6 +400,10 @@ define_query!(
 define_query!(
     KEYMAP_QUERY_2026_03_23,
     migrations::m_2026_03_23::KEYMAP_PATTERNS
+);
+define_query!(
+    SETTINGS_QUERY_2026_05_04,
+    migrations::m_2026_05_04::SETTINGS_PATTERNS
 );
 
 // custom query
@@ -5347,6 +5357,42 @@ mod tests {
     }
 
     #[test]
+    fn test_rename_hide_mouse_on_typing_and_movement_to_on_typing_and_action() {
+        assert_migrate_settings(
+            r#"
+                {
+                    "hide_mouse": "on_typing_and_movement"
+                }
+            "#,
+            Some(
+                r#"
+                {
+                    "hide_mouse": "on_typing_and_action"
+                }
+            "#,
+            ),
+        );
+    }
+
+    #[test]
+    fn test_chain_hide_mouse_while_typing_to_on_typing_and_action() {
+        assert_migrate_settings(
+            r#"
+                {
+                    "hide_mouse_while_typing": true
+                }
+            "#,
+            Some(
+                r#"
+                {
+                    "hide_mouse": "on_typing_and_action"
+                }
+            "#,
+            ),
+        );
+    }
+
+    #[test]
     fn test_promote_show_branch_icon_true_to_show_branch_status_icon_no_change_when_already_migrated()
      {
         assert_migrate_settings(
@@ -5376,6 +5422,271 @@ mod tests {
             "#
             .unindent(),
             None,
+        );
+    }
+
+    #[test]
+    fn test_make_git_gutter_width_an_enum_from_number() {
+        assert_migrate_settings(
+            &r#"
+            {
+                "gutter": {
+                    "git_gutter_width": 4.0
+                }
+            }
+            "#
+            .unindent(),
+            Some(
+                &r#"
+                {
+                    "gutter": {
+                        "git_gutter_width": {
+                            "custom": 4.0
+                        }
+                    }
+                }
+                "#
+                .unindent(),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_make_git_gutter_width_an_enum_no_change_when_already_migrated() {
+        // already "default" string — no change
+        assert_migrate_settings(
+            &r#"
+            {
+                "gutter": {
+                    "git_gutter_width": "default"
+                }
+            }
+            "#
+            .unindent(),
+            None,
+        );
+
+        // already custom object — no change
+        assert_migrate_settings(
+            &r#"
+            {
+                "gutter": {
+                    "git_gutter_width": { "custom": 4.0 }
+                }
+            }
+            "#
+            .unindent(),
+            None,
+        );
+
+        // no gutter key — no change
+        assert_migrate_settings(&r#"{ "theme": "One Dark" }"#.unindent(), None);
+    }
+
+    #[test]
+    fn test_rename_folder_icons_to_folder_indicator_in_all_panels() {
+        assert_migrate_with_migrations(
+            &[MigrationType::Json(
+                migrations::m_2026_08_26::rename_folder_icons_to_folder_indicator,
+            )],
+            &r#"
+            {
+                "project_panel": {
+                    "folder_icons": true
+                },
+                "outline_panel": {
+                    "folder_icons": false
+                },
+                "git_panel": {
+                    "folder_icons": true
+                }
+            }
+            "#
+            .unindent(),
+            Some(
+                &r#"
+                {
+                    "project_panel": {
+                        "folder_indicator": "icon"
+                    },
+                    "outline_panel": {
+                        "folder_indicator": "chevron"
+                    },
+                    "git_panel": {
+                        "folder_indicator": "icon"
+                    }
+                }
+                "#
+                .unindent(),
+            ),
+        );
+    }
+
+    // The shared JSON migration driver applies a rename as a delete plus an add, and
+    // added keys are written to the front of their object. Comments and sibling values
+    // survive; only the renamed key's position moves.
+    #[test]
+    fn test_rename_folder_icons_to_folder_indicator_preserves_comments_and_siblings() {
+        assert_migrate_with_migrations(
+            &[MigrationType::Json(
+                migrations::m_2026_08_26::rename_folder_icons_to_folder_indicator,
+            )],
+            &r#"
+            {
+                // Keep this comment.
+                "project_panel": {
+                    "file_icons": true,
+                    "folder_icons": false,
+                    "indent_size": 20
+                }
+            }
+            "#
+            .unindent(),
+            Some(
+                &r#"
+                {
+                    // Keep this comment.
+                    "project_panel": {
+                        "folder_indicator": "chevron",
+                        "file_icons": true,
+                        "indent_size": 20
+                    }
+                }
+                "#
+                .unindent(),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_rename_folder_icons_to_folder_indicator_in_platform_overrides() {
+        assert_migrate_with_migrations(
+            &[MigrationType::Json(
+                migrations::m_2026_08_26::rename_folder_icons_to_folder_indicator,
+            )],
+            &r#"
+            {
+                "macos": {
+                    "project_panel": {
+                        "folder_icons": false
+                    }
+                }
+            }
+            "#
+            .unindent(),
+            Some(
+                &r#"
+                {
+                    "macos": {
+                        "project_panel": {
+                            "folder_indicator": "chevron"
+                        }
+                    }
+                }
+                "#
+                .unindent(),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_rename_folder_icons_to_folder_indicator_does_not_clobber_new_key() {
+        assert_migrate_with_migrations(
+            &[MigrationType::Json(
+                migrations::m_2026_08_26::rename_folder_icons_to_folder_indicator,
+            )],
+            &r#"
+            {
+                "project_panel": {
+                    "folder_icons": true,
+                    "folder_indicator": "both"
+                }
+            }
+            "#
+            .unindent(),
+            Some(
+                &r#"
+                {
+                    "project_panel": {
+                        "folder_indicator": "both"
+                    }
+                }
+                "#
+                .unindent(),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_rename_folder_icons_to_folder_indicator_no_change_cases() {
+        let migrations = &[MigrationType::Json(
+            migrations::m_2026_08_26::rename_folder_icons_to_folder_indicator,
+        )];
+
+        // Already migrated.
+        assert_migrate_with_migrations(
+            migrations,
+            &r#"
+            {
+                "project_panel": {
+                    "folder_indicator": "both"
+                }
+            }
+            "#
+            .unindent(),
+            None,
+        );
+
+        // A non-boolean value is already invalid; leave it rather than guess.
+        assert_migrate_with_migrations(
+            migrations,
+            &r#"
+            {
+                "project_panel": {
+                    "folder_icons": 3
+                }
+            }
+            "#
+            .unindent(),
+            None,
+        );
+
+        // `folder_icons` outside the three panels is not ours to rename.
+        assert_migrate_with_migrations(
+            migrations,
+            &r#"
+            {
+                "terminal": {
+                    "folder_icons": true
+                }
+            }
+            "#
+            .unindent(),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_rename_folder_icons_to_folder_indicator_is_registered() {
+        assert_migrate_settings(
+            &r#"
+            {
+                "project_panel": {
+                    "folder_icons": false
+                }
+            }
+            "#
+            .unindent(),
+            Some(
+                &r#"
+                {
+                    "project_panel": {
+                        "folder_indicator": "chevron"
+                    }
+                }
+                "#
+                .unindent(),
+            ),
         );
     }
 }
